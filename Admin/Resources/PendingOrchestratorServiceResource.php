@@ -62,9 +62,9 @@ class PendingOrchestratorServiceResource extends Resource
                 TextColumn::make('required_storage_mb')
                     ->label('Required Storage (MB)')
                     ->state(fn (Service $record) => static::requirementsForService($record)['storage_mb']),
-                TextColumn::make('required_bandwidth_mbps')
-                    ->label('Required Bandwidth (Mbps)')
-                    ->state(fn (Service $record) => static::requirementsForService($record)['bandwidth_mbps']),
+                TextColumn::make('required_traffic_gb')
+                    ->label('Required Traffic (GB/month)')
+                    ->state(fn (Service $record) => static::requirementsForService($record)['traffic_gb']),
                 TextColumn::make('pending_reason')
                     ->label('Reason')
                     ->badge()
@@ -112,7 +112,7 @@ class PendingOrchestratorServiceResource extends Resource
                             ->label('Target Server')
                             ->required()
                             ->searchable()
-                            ->placeholder('No hay espacio en ningún lado')
+                            ->placeholder('No capacity available anywhere')
                             ->options(fn (Service $record) => static::availablePoolOptions($record)),
                     ])
                     ->action(function (Service $record, array $data): void {
@@ -151,15 +151,15 @@ class PendingOrchestratorServiceResource extends Resource
 
                         $usedSlots = (int) $pool->allocations()->sum('slots');
                         $usedStorage = (int) $pool->allocations()->sum('storage_mb');
-                        $usedBandwidth = (int) $pool->allocations()->sum('bandwidth_mbps');
+                        $usedBandwidth = (int) $pool->allocations()->sum('traffic_gb');
 
                         $availableSlots = (int) $pool->total_slots - $usedSlots;
                         $availableStorage = (int) $pool->total_storage_mb - $usedStorage;
-                        $availableBandwidth = (int) $pool->total_bandwidth_mbps - $usedBandwidth;
+                        $availableBandwidth = (int) $pool->total_traffic_gb - $usedBandwidth;
 
                         $hasSlots = $availableSlots >= $requirements['slots'];
                         $hasStorage = $availableStorage >= $requirements['storage_mb'];
-                        $hasBandwidth = $availableBandwidth >= $requirements['bandwidth_mbps'];
+                        $hasBandwidth = $availableBandwidth >= $requirements['traffic_gb'];
 
                         if (!$hasSlots || !$hasStorage || !$hasBandwidth) {
                             Notification::make()
@@ -189,7 +189,7 @@ class PendingOrchestratorServiceResource extends Resource
                                 'target_server_id' => $pool->target_server_id,
                                 'slots' => $requirements['slots'],
                                 'storage_mb' => $requirements['storage_mb'],
-                                'bandwidth_mbps' => $requirements['bandwidth_mbps'],
+                                'traffic_gb' => $requirements['traffic_gb'],
                             ]);
                             $createdAllocation = true;
                         }
@@ -274,33 +274,33 @@ class PendingOrchestratorServiceResource extends Resource
 
                 $usedSlots = (int) $pool->allocations()->sum('slots');
                 $usedStorage = (int) $pool->allocations()->sum('storage_mb');
-                $usedBandwidth = (int) $pool->allocations()->sum('bandwidth_mbps');
+                $usedBandwidth = (int) $pool->allocations()->sum('traffic_gb');
 
                 $availableSlots = (int) $pool->total_slots - $usedSlots;
                 $availableStorage = (int) $pool->total_storage_mb - $usedStorage;
-                $availableBandwidth = (int) $pool->total_bandwidth_mbps - $usedBandwidth;
+                $availableBandwidth = (int) $pool->total_traffic_gb - $usedBandwidth;
 
                 return $availableSlots >= $requirements['slots']
                     && $availableStorage >= $requirements['storage_mb']
-                    && $availableBandwidth >= $requirements['bandwidth_mbps'];
+                    && $availableBandwidth >= $requirements['traffic_gb'];
             })
             ->mapWithKeys(function (OrchestratorServerPool $pool) {
                 $usedSlots = (int) $pool->allocations()->sum('slots');
                 $availableSlots = (int) $pool->total_slots - $usedSlots;
                 $usedStorage = (int) $pool->allocations()->sum('storage_mb');
-                $usedBandwidth = (int) $pool->allocations()->sum('bandwidth_mbps');
+                $usedBandwidth = (int) $pool->allocations()->sum('traffic_gb');
                 $availableStorage = (int) $pool->total_storage_mb - $usedStorage;
-                $availableBandwidth = (int) $pool->total_bandwidth_mbps - $usedBandwidth;
+                $availableBandwidth = (int) $pool->total_traffic_gb - $usedBandwidth;
 
                 $label = sprintf(
-                    '%s (slots: %d/%d, storage: %dMB/%dMB, bandwidth: %dMbps/%dMbps)',
+                    '%s (slots: %d/%d, storage: %dMB/%dMB, traffic: %dGB/%dGB)',
                     $pool->targetServer->name,
                     $availableSlots,
                     (int) $pool->total_slots,
                     $availableStorage,
                     (int) $pool->total_storage_mb,
                     $availableBandwidth,
-                    (int) $pool->total_bandwidth_mbps,
+                    (int) $pool->total_traffic_gb,
                 );
 
                 return [$pool->id => $label];
@@ -317,7 +317,7 @@ class PendingOrchestratorServiceResource extends Resource
         return [
             'slots' => static::resolveRequirement($service, $merged, 'required_slots', 1),
             'storage_mb' => static::resolveRequirement($service, $merged, 'required_storage_mb', 0),
-            'bandwidth_mbps' => static::resolveRequirement($service, $merged, 'required_bandwidth_mbps', 0),
+            'traffic_gb' => static::resolveRequirement($service, $merged, 'required_traffic_gb', 0),
         ];
     }
 

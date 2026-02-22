@@ -10,23 +10,23 @@ return new class extends Migration
     {
         Schema::table('ext_orchestrator_server_pools', function (Blueprint $table) {
             $table->unsignedBigInteger('total_storage_mb')->default(0)->after('total_slots');
-            $table->unsignedInteger('total_bandwidth_mbps')->default(0)->after('total_storage_mb');
+            $table->unsignedBigInteger('total_traffic_gb')->default(0)->after('total_storage_mb');
         });
 
         Schema::table('ext_orchestrator_service_allocations', function (Blueprint $table) {
             $table->unsignedBigInteger('storage_mb')->default(0)->after('slots');
-            $table->unsignedInteger('bandwidth_mbps')->default(0)->after('storage_mb');
+            $table->unsignedBigInteger('traffic_gb')->default(0)->after('storage_mb');
         });
     }
 
     public function down(): void
     {
         Schema::table('ext_orchestrator_service_allocations', function (Blueprint $table) {
-            $table->dropColumn(['storage_mb', 'bandwidth_mbps']);
+            $table->dropColumn(['storage_mb', 'traffic_gb']);
         });
 
         Schema::table('ext_orchestrator_server_pools', function (Blueprint $table) {
-            $table->dropColumn(['total_storage_mb', 'total_bandwidth_mbps']);
+            $table->dropColumn(['total_storage_mb', 'total_traffic_gb']);
         });
     }
 };
