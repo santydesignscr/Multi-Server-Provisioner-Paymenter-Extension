@@ -16,6 +16,8 @@ class OrchestratorServiceAllocation extends Model
         'service_id',
         'target_server_id',
         'slots',
+        'storage_mb',
+        'bandwidth_mbps',
     ];
 
     public function pool(): BelongsTo

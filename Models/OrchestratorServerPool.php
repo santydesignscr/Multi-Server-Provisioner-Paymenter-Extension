@@ -15,6 +15,8 @@ class OrchestratorServerPool extends Model
         'orchestrator_server_id',
         'target_server_id',
         'total_slots',
+        'total_storage_mb',
+        'total_bandwidth_mbps',
         'maintenance',
     ];
 

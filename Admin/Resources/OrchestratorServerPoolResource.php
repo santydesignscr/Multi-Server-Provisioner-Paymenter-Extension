@@ -60,6 +60,18 @@ class OrchestratorServerPoolResource extends Resource
                     ->numeric()
                     ->minValue(0)
                     ->default(0),
+                TextInput::make('total_storage_mb')
+                    ->label('Total Storage (MB)')
+                    ->numeric()
+                    ->minValue(0)
+                    ->default(0)
+                    ->helperText('Capacidad total de almacenamiento disponible para clientes en este pool.'),
+                TextInput::make('total_bandwidth_mbps')
+                    ->label('Total Bandwidth (Mbps)')
+                    ->numeric()
+                    ->minValue(0)
+                    ->default(0)
+                    ->helperText('Ancho de banda disponible para asignaciones de clientes en este pool.'),
                 Toggle::make('maintenance')
                     ->label('Maintenance')
                     ->default(false),
@@ -102,6 +114,32 @@ class OrchestratorServerPoolResource extends Resource
                         $usedSlots = (int) $record->allocations()->sum('slots');
 
                         return number_format(($usedSlots / $totalSlots) * 100, 2) . '%';
+                    }),
+                TextColumn::make('total_storage_mb')
+                    ->label('Total Storage (MB)')
+                    ->sortable(),
+                TextColumn::make('used_storage_mb')
+                    ->label('Used Storage (MB)')
+                    ->state(fn (OrchestratorServerPool $record) => (int) $record->allocations()->sum('storage_mb')),
+                TextColumn::make('available_storage_mb')
+                    ->label('Available Storage (MB)')
+                    ->state(function (OrchestratorServerPool $record) {
+                        $used = (int) $record->allocations()->sum('storage_mb');
+
+                        return max(0, (int) $record->total_storage_mb - $used);
+                    }),
+                TextColumn::make('total_bandwidth_mbps')
+                    ->label('Total Bandwidth (Mbps)')
+                    ->sortable(),
+                TextColumn::make('used_bandwidth_mbps')
+                    ->label('Used Bandwidth (Mbps)')
+                    ->state(fn (OrchestratorServerPool $record) => (int) $record->allocations()->sum('bandwidth_mbps')),
+                TextColumn::make('available_bandwidth_mbps')
+                    ->label('Available Bandwidth (Mbps)')
+                    ->state(function (OrchestratorServerPool $record) {
+                        $used = (int) $record->allocations()->sum('bandwidth_mbps');
+
+                        return max(0, (int) $record->total_bandwidth_mbps - $used);
                     }),
                 IconColumn::make('maintenance')
                     ->label('Maintenance')

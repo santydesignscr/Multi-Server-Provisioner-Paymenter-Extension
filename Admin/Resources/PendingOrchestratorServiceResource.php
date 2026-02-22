@@ -58,7 +58,13 @@ class PendingOrchestratorServiceResource extends Resource
                     ->searchable(),
                 TextColumn::make('required_slots')
                     ->label('Required Slots')
-                    ->state(fn (Service $record) => static::requiredSlotsForService($record)),
+                    ->state(fn (Service $record) => static::requirementsForService($record)['slots']),
+                TextColumn::make('required_storage_mb')
+                    ->label('Required Storage (MB)')
+                    ->state(fn (Service $record) => static::requirementsForService($record)['storage_mb']),
+                TextColumn::make('required_bandwidth_mbps')
+                    ->label('Required Bandwidth (Mbps)')
+                    ->state(fn (Service $record) => static::requirementsForService($record)['bandwidth_mbps']),
                 TextColumn::make('pending_reason')
                     ->label('Reason')
                     ->badge()
@@ -141,11 +147,21 @@ class PendingOrchestratorServiceResource extends Resource
                             return;
                         }
 
-                        $requiredSlots = static::requiredSlotsForService($record);
-                        $usedSlots = (int) $pool->allocations()->sum('slots');
-                        $availableSlots = (int) $pool->total_slots - $usedSlots;
+                        $requirements = static::requirementsForService($record);
 
-                        if ($availableSlots < $requiredSlots) {
+                        $usedSlots = (int) $pool->allocations()->sum('slots');
+                        $usedStorage = (int) $pool->allocations()->sum('storage_mb');
+                        $usedBandwidth = (int) $pool->allocations()->sum('bandwidth_mbps');
+
+                        $availableSlots = (int) $pool->total_slots - $usedSlots;
+                        $availableStorage = (int) $pool->total_storage_mb - $usedStorage;
+                        $availableBandwidth = (int) $pool->total_bandwidth_mbps - $usedBandwidth;
+
+                        $hasSlots = $availableSlots >= $requirements['slots'];
+                        $hasStorage = $availableStorage >= $requirements['storage_mb'];
+                        $hasBandwidth = $availableBandwidth >= $requirements['bandwidth_mbps'];
+
+                        if (!$hasSlots || !$hasStorage || !$hasBandwidth) {
                             Notification::make()
                                 ->title('No capacity available in selected server')
                                 ->danger()
@@ -171,7 +187,9 @@ class PendingOrchestratorServiceResource extends Resource
                                 'orchestrator_server_pool_id' => $pool->id,
                                 'service_id' => $record->id,
                                 'target_server_id' => $pool->target_server_id,
-                                'slots' => $requiredSlots,
+                                'slots' => $requirements['slots'],
+                                'storage_mb' => $requirements['storage_mb'],
+                                'bandwidth_mbps' => $requirements['bandwidth_mbps'],
                             ]);
                             $createdAllocation = true;
                         }
@@ -243,50 +261,93 @@ class PendingOrchestratorServiceResource extends Resource
 
     protected static function availablePoolOptions(Service $service): array
     {
-        $requiredSlots = static::requiredSlotsForService($service);
+        $requirements = static::requirementsForService($service);
 
         return OrchestratorServerPool::with('targetServer')
             ->where('orchestrator_server_id', (int) $service->product->server_id)
             ->where('maintenance', false)
             ->get()
-            ->filter(function (OrchestratorServerPool $pool) use ($requiredSlots) {
+            ->filter(function (OrchestratorServerPool $pool) use ($requirements) {
                 if (!$pool->targetServer || strtolower($pool->targetServer->extension) === 'orchestrator') {
                     return false;
                 }
 
                 $usedSlots = (int) $pool->allocations()->sum('slots');
-                $availableSlots = (int) $pool->total_slots - $usedSlots;
+                $usedStorage = (int) $pool->allocations()->sum('storage_mb');
+                $usedBandwidth = (int) $pool->allocations()->sum('bandwidth_mbps');
 
-                return $availableSlots >= $requiredSlots;
+                $availableSlots = (int) $pool->total_slots - $usedSlots;
+                $availableStorage = (int) $pool->total_storage_mb - $usedStorage;
+                $availableBandwidth = (int) $pool->total_bandwidth_mbps - $usedBandwidth;
+
+                return $availableSlots >= $requirements['slots']
+                    && $availableStorage >= $requirements['storage_mb']
+                    && $availableBandwidth >= $requirements['bandwidth_mbps'];
             })
             ->mapWithKeys(function (OrchestratorServerPool $pool) {
                 $usedSlots = (int) $pool->allocations()->sum('slots');
                 $availableSlots = (int) $pool->total_slots - $usedSlots;
-                $label = sprintf('%s (available: %d / total: %d)', $pool->targetServer->name, $availableSlots, (int) $pool->total_slots);
+                $usedStorage = (int) $pool->allocations()->sum('storage_mb');
+                $usedBandwidth = (int) $pool->allocations()->sum('bandwidth_mbps');
+                $availableStorage = (int) $pool->total_storage_mb - $usedStorage;
+                $availableBandwidth = (int) $pool->total_bandwidth_mbps - $usedBandwidth;
+
+                $label = sprintf(
+                    '%s (slots: %d/%d, storage: %dMB/%dMB, bandwidth: %dMbps/%dMbps)',
+                    $pool->targetServer->name,
+                    $availableSlots,
+                    (int) $pool->total_slots,
+                    $availableStorage,
+                    (int) $pool->total_storage_mb,
+                    $availableBandwidth,
+                    (int) $pool->total_bandwidth_mbps,
+                );
 
                 return [$pool->id => $label];
             })
             ->toArray();
     }
 
-    protected static function requiredSlotsForService(Service $service): int
+    protected static function requirementsForService(Service $service): array
     {
         $settings = ExtensionHelper::settingsToArray($service->product->settings);
         $properties = ExtensionHelper::getServiceProperties($service);
         $merged = array_merge($settings, $properties);
 
-        $resolved = (int) ($merged['required_slots'] ?? 0);
-        if ($resolved > 0) {
-            return $resolved;
+        return [
+            'slots' => static::resolveRequirement($service, $merged, 'required_slots', 1),
+            'storage_mb' => static::resolveRequirement($service, $merged, 'required_storage_mb', 0),
+            'bandwidth_mbps' => static::resolveRequirement($service, $merged, 'required_bandwidth_mbps', 0),
+        ];
+    }
+
+    protected static function resolveRequirement(Service $service, array $merged, string $key, int $default): int
+    {
+        $resolved = (int) ($merged[$key] ?? 0);
+
+        if ($key === 'required_slots') {
+            if ($resolved > 0) {
+                return $resolved;
+            }
+        } else {
+            if ($resolved >= 0 && array_key_exists($key, $merged)) {
+                return max(0, $resolved);
+            }
         }
 
-        $dbSetting = $service->product?->settings?->firstWhere('key', 'required_slots');
+        $dbSetting = $service->product?->settings?->firstWhere('key', $key);
         $dbValue = (int) ($dbSetting?->value ?? 0);
-        if ($dbValue > 0) {
-            return $dbValue;
+
+        if ($key === 'required_slots') {
+            return $dbValue > 0 ? $dbValue : $default;
         }
 
-        return 1;
+        return max($default, $dbValue);
+    }
+
+    protected static function requiredSlotsForService(Service $service): int
+    {
+        return static::requirementsForService($service)['slots'];
     }
 
     protected static function pendingReasonForService(Service $service): string

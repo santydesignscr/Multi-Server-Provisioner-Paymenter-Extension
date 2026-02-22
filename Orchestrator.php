@@ -85,6 +85,24 @@ class Orchestrator extends Server
                 'description' => 'How many slots this product consumes from the orchestrator pool.',
             ],
             [
+                'name' => 'required_storage_mb',
+                'label' => 'Required Storage (MB)',
+                'type' => 'number',
+                'required' => false,
+                'default' => 0,
+                'min_value' => 0,
+                'description' => 'Optional. Storage to reserve from the pool for this product.',
+            ],
+            [
+                'name' => 'required_bandwidth_mbps',
+                'label' => 'Required Bandwidth (Mbps)',
+                'type' => 'number',
+                'required' => false,
+                'default' => 0,
+                'min_value' => 0,
+                'description' => 'Optional. Bandwidth to reserve from the pool for this product.',
+            ],
+            [
                 'name' => 'target_plan',
                 'label' => 'Target Plan / Package Name',
                 'type' => 'text',
@@ -119,7 +137,7 @@ class Orchestrator extends Server
             $service->save();
         }
 
-        $requiredSlots = $this->requiredSlots($service, $settings, $properties);
+        $requirements = $this->resolveRequirements($service, $settings, $properties);
 
         $allocation = OrchestratorServiceAllocation::with('pool.targetServer')
             ->where('service_id', $service->id)
@@ -128,7 +146,7 @@ class Orchestrator extends Server
         $createdAllocation = false;
 
         if (!$allocation) {
-            $allocation = $this->allocatePool((int) $service->product->server_id, $requiredSlots, (int) $service->id);
+            $allocation = $this->allocatePool((int) $service->product->server_id, $requirements, (int) $service->id);
             $createdAllocation = $allocation !== null;
         }
 
@@ -144,12 +162,42 @@ class Orchestrator extends Server
             throw new Exception('No capacity available in orchestrator pools. Service left in pending state.');
         }
 
+        $pool = $allocation->pool;
+
+        if (!$pool) {
+            throw new Exception('No pool found for the orchestrator allocation.');
+        }
+
+        if (!$this->poolHasCapacity($pool, $requirements, $allocation->id)) {
+            if ($createdAllocation) {
+                $allocation->delete();
+            }
+
+            $service->status = Service::STATUS_PENDING;
+            $service->save();
+
+            $this->syncOrchestratorProperties($service, [
+                'orchestrator_provisioning_state' => 'pending',
+                'orchestrator_pending_reason' => 'no_capacity',
+            ]);
+
+            throw new Exception('No capacity available in orchestrator pools for the requested storage/bandwidth.');
+        }
+
+        $allocation->update([
+            'slots' => $requirements['slots'],
+            'storage_mb' => $requirements['storage_mb'],
+            'bandwidth_mbps' => $requirements['bandwidth_mbps'],
+        ]);
+
         try {
             $result = $this->callTargetAction($allocation, 'createServer', $service, $settings, $properties);
 
             $this->syncOrchestratorProperties($service, [
                 'orchestrator_target_server_id' => (string) $allocation->target_server_id,
                 'orchestrator_required_slots' => (string) $allocation->slots,
+                'orchestrator_required_storage_mb' => (string) $allocation->storage_mb,
+                'orchestrator_required_bandwidth_mbps' => (string) $allocation->bandwidth_mbps,
                 'orchestrator_server_pool_id' => (string) $allocation->orchestrator_server_pool_id,
                 'orchestrator_provisioning_state' => 'active',
             ]);
@@ -163,6 +211,8 @@ class Orchestrator extends Server
             return array_merge(is_array($result) ? $result : [], [
                 'orchestrator_target_server_id' => $allocation->target_server_id,
                 'orchestrator_required_slots' => $allocation->slots,
+                'orchestrator_required_storage_mb' => $allocation->storage_mb,
+                'orchestrator_required_bandwidth_mbps' => $allocation->bandwidth_mbps,
             ]);
         } catch (Exception $e) {
             $service->status = Service::STATUS_PENDING;
@@ -206,6 +256,8 @@ class Orchestrator extends Server
         $service->properties()->whereIn('key', [
             'orchestrator_target_server_id',
             'orchestrator_required_slots',
+            'orchestrator_required_storage_mb',
+            'orchestrator_required_bandwidth_mbps',
             'orchestrator_server_pool_id',
             'orchestrator_provisioning_state',
             'orchestrator_pending_reason',
@@ -274,6 +326,8 @@ class Orchestrator extends Server
         $targetServerId = (int) ($service->properties()->where('key', 'orchestrator_target_server_id')->value('value') ?? 0);
         $poolId = (int) ($service->properties()->where('key', 'orchestrator_server_pool_id')->value('value') ?? 0);
         $slots = (int) ($service->properties()->where('key', 'orchestrator_required_slots')->value('value') ?? 0);
+        $storageMb = (int) ($service->properties()->where('key', 'orchestrator_required_storage_mb')->value('value') ?? 0);
+        $bandwidthMbps = (int) ($service->properties()->where('key', 'orchestrator_required_bandwidth_mbps')->value('value') ?? 0);
 
         if ($targetServerId > 0) {
             $pool = OrchestratorServerPool::query()
@@ -289,6 +343,8 @@ class Orchestrator extends Server
                         'orchestrator_server_pool_id' => $pool->id,
                         'target_server_id' => $pool->target_server_id,
                         'slots' => max(1, $slots),
+                        'storage_mb' => max(0, $storageMb),
+                        'bandwidth_mbps' => max(0, $bandwidthMbps),
                     ]
                 );
 
@@ -311,12 +367,16 @@ class Orchestrator extends Server
                     'orchestrator_server_pool_id' => $fallbackPool->id,
                     'target_server_id' => $fallbackPool->target_server_id,
                     'slots' => max(1, $slots),
+                        'storage_mb' => max(0, $storageMb),
+                        'bandwidth_mbps' => max(0, $bandwidthMbps),
                 ]
             );
 
             $this->syncOrchestratorProperties($service, [
                 'orchestrator_target_server_id' => (string) $fallbackPool->target_server_id,
                 'orchestrator_required_slots' => (string) max(1, $slots),
+                'orchestrator_required_storage_mb' => (string) max(0, $storageMb),
+                'orchestrator_required_bandwidth_mbps' => (string) max(0, $bandwidthMbps),
                 'orchestrator_server_pool_id' => (string) $fallbackPool->id,
             ]);
 
@@ -328,7 +388,30 @@ class Orchestrator extends Server
         throw new Exception('No orchestrator allocation found for this service.');
     }
 
-    protected function allocatePool(int $orchestratorServerId, int $requiredSlots, int $serviceId): ?OrchestratorServiceAllocation
+    protected function poolUsage(OrchestratorServerPool $pool, ?int $ignoreAllocationId = null): array
+    {
+        $allocations = $pool->allocations()
+            ->when($ignoreAllocationId, fn ($query) => $query->where('id', '!=', $ignoreAllocationId));
+
+        return [
+            'slots' => (int) $allocations->sum('slots'),
+            'storage_mb' => (int) $allocations->sum('storage_mb'),
+            'bandwidth_mbps' => (int) $allocations->sum('bandwidth_mbps'),
+        ];
+    }
+
+    protected function poolHasCapacity(OrchestratorServerPool $pool, array $requirements, ?int $ignoreAllocationId = null): bool
+    {
+        $usage = $this->poolUsage($pool, $ignoreAllocationId);
+
+        $slotsOk = (int) $pool->total_slots >= $usage['slots'] + $requirements['slots'];
+        $storageOk = (int) $pool->total_storage_mb >= $usage['storage_mb'] + $requirements['storage_mb'];
+        $bandwidthOk = (int) $pool->total_bandwidth_mbps >= $usage['bandwidth_mbps'] + $requirements['bandwidth_mbps'];
+
+        return $slotsOk && $storageOk && $bandwidthOk;
+    }
+
+    protected function allocatePool(int $orchestratorServerId, array $requirements, int $serviceId): ?OrchestratorServiceAllocation
     {
         $pools = OrchestratorServerPool::with('targetServer')
             ->where('orchestrator_server_id', $orchestratorServerId)
@@ -342,21 +425,30 @@ class Orchestrator extends Server
                 continue;
             }
 
-            $usedSlots = (int) $pool->allocations()->sum('slots');
-            $availableSlots = (int) $pool->total_slots - $usedSlots;
+            $usage = $this->poolUsage($pool);
 
-            if ($availableSlots < $requiredSlots) {
+            $availableSlots = (int) $pool->total_slots - $usage['slots'];
+            $availableStorage = (int) $pool->total_storage_mb - $usage['storage_mb'];
+            $availableBandwidth = (int) $pool->total_bandwidth_mbps - $usage['bandwidth_mbps'];
+
+            $meetsSlots = $availableSlots >= $requirements['slots'];
+            $meetsStorage = $availableStorage >= $requirements['storage_mb'];
+            $meetsBandwidth = $availableBandwidth >= $requirements['bandwidth_mbps'];
+
+            if (!$meetsSlots || !$meetsStorage || !$meetsBandwidth) {
                 continue;
             }
 
             $usagePercentage = $pool->total_slots > 0
-                ? round(($usedSlots / (int) $pool->total_slots) * 100, 4)
+                ? round(($usage['slots'] / (int) $pool->total_slots) * 100, 4)
                 : 100.0;
 
             $candidates[] = [
                 'pool' => $pool,
-                'used_slots' => $usedSlots,
+                'used_slots' => $usage['slots'],
                 'available_slots' => $availableSlots,
+                'available_storage' => $availableStorage,
+                'available_bandwidth' => $availableBandwidth,
                 'usage_percentage' => $usagePercentage,
                 'last_allocated_at' => $pool->allocations()->max('created_at'),
             ];
@@ -396,7 +488,9 @@ class Orchestrator extends Server
             'orchestrator_server_pool_id' => $selectedPool->id,
             'service_id' => $serviceId,
             'target_server_id' => $selectedPool->target_server_id,
-            'slots' => $requiredSlots,
+            'slots' => $requirements['slots'],
+            'storage_mb' => $requirements['storage_mb'],
+            'bandwidth_mbps' => $requirements['bandwidth_mbps'],
         ]);
 
     }
@@ -424,6 +518,15 @@ class Orchestrator extends Server
         return $this->invokeTargetAction($targetExtension, $action, $service, $payload['settings'], $payload['properties'], $extraArgs);
     }
 
+    protected function resolveRequirements(Service $service, array $settings, array $properties): array
+    {
+        return [
+            'slots' => $this->requiredSlots($service, $settings, $properties),
+            'storage_mb' => $this->requiredStorageMb($service, $settings, $properties),
+            'bandwidth_mbps' => $this->requiredBandwidthMbps($service, $settings, $properties),
+        ];
+    }
+
     protected function requiredSlots(Service $service, array $settings, array $properties): int
     {
         $merged = array_merge($settings, $properties);
@@ -440,6 +543,34 @@ class Orchestrator extends Server
         }
 
         return 1;
+    }
+
+    protected function requiredStorageMb(Service $service, array $settings, array $properties): int
+    {
+        $merged = array_merge($settings, $properties);
+
+        $resolved = (int) ($merged['required_storage_mb'] ?? 0);
+        if ($resolved > 0) {
+            return $resolved;
+        }
+
+        $dbSetting = $service->product?->settings?->firstWhere('key', 'required_storage_mb');
+
+        return max(0, (int) ($dbSetting?->value ?? 0));
+    }
+
+    protected function requiredBandwidthMbps(Service $service, array $settings, array $properties): int
+    {
+        $merged = array_merge($settings, $properties);
+
+        $resolved = (int) ($merged['required_bandwidth_mbps'] ?? 0);
+        if ($resolved > 0) {
+            return $resolved;
+        }
+
+        $dbSetting = $service->product?->settings?->firstWhere('key', 'required_bandwidth_mbps');
+
+        return max(0, (int) ($dbSetting?->value ?? 0));
     }
 
     protected function buildTargetPayload(array $settings, array $properties): array
